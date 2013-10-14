@@ -10,14 +10,19 @@ from tornado import (
     web,
 )
 from tornado.options import options as options_data
+import time
 
 from chunked_handler import ChunkedHandler
 #import naive
 
-
 class SampleChunkedHandler(ChunkedHandler):
     @web.asynchronous
     def post(self):
+
+        #time.sleep(10)
+
+        print("POST received...")
+
         if not self._handle_chunked():
             raise web.HTTPError(500, "non-chunked request")
 

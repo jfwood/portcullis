@@ -10,6 +10,7 @@ from iostream_callback import (
     Data,
     DONE,
 )
+import time
 
 from cStringIO import StringIO
 
@@ -65,7 +66,7 @@ class LengthCallback(Callback):
     start_state = WAIT_LENGTH
 
     def _handle(self, data):
-        print('length::_handle()...data="{0}"'.format(data))
+        print('length::_handle()...length-data="{0}"'.format(data))
 
         assert data[-2:] == '\r\n', "chunk size ends with CRLF"
         self.data.chunk_length = int(data[:-2], 16)
@@ -81,11 +82,19 @@ class DataCallback(Callback):
     start_state = WAIT_CHUNK
 
     def _handle(self, data):
-        print('data::_handle()...data="{0}"'.format(data))
+        print('ddddddddddddddata::_handle()...data')
+
+        # time.sleep(10)
 
         assert data[-2:] == '\r\n', "chunk data ends with CRLF"
         self.data.chunk.write(data[:-2])
-        print('...writing:{0}'.format(data[:-2]))
+
+        # time_curr = time.time()
+        # while True:
+        #     delta = time.time() - time_curr
+        #     if delta > 10:
+        #         break
+        # print('...wwwwwriting:{0}'.format(data[:-2]))
 
         self.data.state = WAIT_LENGTH
 
@@ -97,7 +106,7 @@ class ChunkReader(object):
         stream = handler.request.connection.stream
 
         data = ChunkedData()
-        print('Chunk reader - init: data={0}'.format(data))
+        print('Chunk reader - init: data')
         func = Callback.make_entry_callback(data, (
                 LengthCallback(data,
                     lambda self: stream.read_until('\r\n', self)),
@@ -117,8 +126,9 @@ class ChunkedHandler(web.RequestHandler):
         # we assume that the wrapping server has not sent/flushed the
         # 100 (Continue) response
         print('_handle_chunked()...{0}'.format(self.request.headers))
-        if self.request.headers.get('Expect', None) == '100-continue' and \
-            self.request.headers.get('Transfer-Encoding', None) == 'chunked':
+        if self.request.headers.get('Transfer-Encoding', None) == 'chunked':
+        #if self.request.headers.get('Expect', None) == '100-continue' and \
+        #    self.request.headers.get('Transfer-Encoding', None) == 'chunked':
 
         #TODO(jwood) Why is Content-Length coming over from Tornado, even though chunked xfer???
         # if self.request.headers.get('Expect', None) == '100-continue' and \
@@ -136,5 +146,10 @@ class ChunkedHandler(web.RequestHandler):
         return False
 
     def _on_chunks(self, all_chunks):
-        print('finish(): "{0}"'.format(all_chunks.getvalue()))
+        print('finish()')
+
+        #TODO(jwood) Dump to file...yeah, this isn't production stuff here.
+        f = open('final_output.dat', 'wb')
+        f.write(all_chunks.getvalue())
+
         self.finish()

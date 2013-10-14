@@ -15,6 +15,7 @@ An example of callbacks built on this:
 """
 
 from tornado import web
+import time
 
 DONE = (0, )
 
@@ -68,7 +69,10 @@ class Callback(object):
                 for callback in callbacks:
                     print ('....func(): callback-"{0}"'.format(callback.start_state))
                     if data.state is callback.start_state:
-                        print ('....calling callback()={0}'.format(callback))
+                        print ('....callinggggg callback()={0}'.format(callback))
+
+                        #time.sleep(10)
+
                         if not callback.enter():
                             # callback did not return immediately
                             print ('returning, callback did not change')

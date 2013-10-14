@@ -31,7 +31,7 @@ from tornado import (
 )
 from tornado.options import options as options_data
 import socket
-
+import pyrox
 
 #TODO(jwood) Consider adding a base Processor class, that this one extends?
 class SampleCryptoProcessor(object):
@@ -71,10 +71,13 @@ class SampleCryptoProcessor(object):
 
 
 class BufferManager(object):
-    def __init__(self, processor=None, max_buffer=4096):
+    def __init__(self, processor=None, max_buffer=4096):  #TODO(jwood): Use this instead!: 4096
         self.max_buffer = max_buffer
         self.processor = processor
         self.buffer = str()
+
+    def size(self):
+        return len(self.buffer)
 
     def receive_data(self, data):
         """Accept, process and store data in buffer."""
@@ -87,11 +90,11 @@ class BufferManager(object):
     def read_next_block(self):
         """Retrieve another 'max_buffer'-sized block of data from this buffer."""
         next_block = str()
-        print(">>>> Buffer before next read: '{0}'".format(self.buffer))
+        print(">>>> Buffer before next read")
         if len(self.buffer) >= self.max_buffer:
             next_block = self.buffer[:self.max_buffer]
             self.buffer = self.buffer[self.max_buffer:]
-        print(">>>> Buffer next block: '{0}'".format(next_block))
+        print(">>>> Buffer next block: '{0}' bytes".format(len(next_block)))
         return next_block
 
     def read_all(self):
@@ -103,13 +106,13 @@ class BufferManager(object):
 
         last_block = self.buffer
         self.buffer = str()
-        print(">>>> Buffer last block: '{0}'".format(last_block))
+        print(">>>> Buffer last block: '{0}' bytes".format(len(last_block)))
         return last_block
 
 
 class ChunkToTargetStateMachine(object):
     """Handle chunking POST data to a target server (Swift for example)."""
-    def __init__(self, callback_on_error):
+    def __init__(self, callback_on_error, buffer_limit_high=10000, buffer_limit_low=5000):
         self.callback_on_error = callback_on_error
 
         #TODO(jwood) Get host/port info from http request itself, if using http proxy conventions
@@ -120,7 +123,17 @@ class ChunkToTargetStateMachine(object):
         self.path = b'/chunked'
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-        self.stream = iostream.IOStream(s)
+        # self.stream = iostream.IOStream(s)
+
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        HOST = socket.gethostbyname(socket.gethostname())
+        print('HOST "{0}"'.format(HOST))
+        s.bind((HOST, 8000))
+        s.listen(1)
+        conn, addr = s.accept()
+        print('SSSSSSSSS addr "{0}"'.format(addr))
+        self.stream = iostream.IOStream(conn)
+
         self.stream.connect((self.host, self.port), self._state_stream_is_idle)
 
         self.buffer_mgr = BufferManager(processor=SampleCryptoProcessor(is_encrypt=True))
@@ -128,8 +141,18 @@ class ChunkToTargetStateMachine(object):
         self.stream_is_sent_first_chunk = False
         self.finish_is_needed = False
 
-    def send_chunk_data(self, data):
+        self.callback_when_ready = None
+        self.is_buffer_saturation_seen = False
+        self.buffer_limit_high = buffer_limit_high
+        self.buffer_limit_low = buffer_limit_low
+
+    def send_chunk_data(self, data, callback):
         """Receive input chunk of 'data' to process and (eventually) send to target."""
+        if callback:
+            if self.callback_when_ready:
+                raise Exception('State machine exception: too many callbacks in progress!')
+            self.callback_when_ready = callback
+
         if data:
             self.buffer_mgr.receive_data(data)
         if self.stream_is_ready:
@@ -150,6 +173,12 @@ class ChunkToTargetStateMachine(object):
             chunk = self.buffer_mgr.read_all()
         self._state_stream_is_busy(chunk)
 
+        if self.callback_when_ready and self._can_accept_more_data():
+            callback = self.callback_when_ready
+            self.callback_when_ready = None
+            print(">>>> CALLBACK to ready when done function")
+            callback()
+
     def _state_stream_is_busy(self, chunk):
         """Indicate that we are entering a need-to-stream-data state."""
         assert self.stream_is_ready
@@ -166,10 +195,12 @@ class ChunkToTargetStateMachine(object):
                  b"Expect: 100-continue\r\n" +
                  b"\r\n")
             if chunk:
+                print("-----------> Write 1st chunk")
                 chunk_out = b'{0}\r\n{1}\r\n'.format(hex(len(chunk))[2:], chunk)
                 self.stream.write(b'{0}{1}'.format(header_out, chunk_out),
                                   callback=self._state_stream_is_idle)
             else:
+                print("-----------> Write 1st header: {0}".format(header_out))
                 self.stream.write(header_out,
                                   callback=self._state_stream_is_idle)
 
@@ -178,15 +209,18 @@ class ChunkToTargetStateMachine(object):
 
         # Else POST the next chunk to the target server.
         elif chunk:
+            print("-----------> Write chunk")
             self.stream.write(b'{0}\r\n{1}\r\n'.format(hex(len(chunk))[2:], chunk),
                               callback=self._state_stream_is_idle)
 
         # Else, we've sent all the data and the 'finish' state is called for, so
         #   output the closing 0-length chunk to end the long-running post.
         elif self.finish_is_needed:
+            print("-----------> Write final")
             self.stream.write(b'0\r\n\r\n',
                               callback=self._state_finished)
         else:
+            print("-----------> Nothing to do")
             self.stream_is_ready = True
 
     def _handle_read_closed(self, response):
@@ -195,6 +229,24 @@ class ChunkToTargetStateMachine(object):
 
     def _state_finished(self):
         print("!!!! Finished sending to target")
+
+    def _can_accept_more_data(self):
+        """Determine if we are saturated with data, and therefore can't accept more data."""
+        buffer_size = self.buffer_mgr.size()
+        print("!!!! Accept more data check {0} bytes !!!!".format(buffer_size))
+
+        # If not saturated, keep accepting data up to high limit.
+        if not self.is_buffer_saturation_seen:
+            if buffer_size > self.buffer_limit_high:
+                print("!!!! SATURATED at {0} bytes !!!!".format(buffer_size))
+                self.is_buffer_saturation_seen = True
+
+        # Else we are saturated, so see if we are no longer saturated.
+        elif buffer_size < self.buffer_limit_low:
+                print("!!!! NOT saturated at {0} bytes !!!!".format(buffer_size))
+                self.is_buffer_saturation_seen = False
+
+        return not self.is_buffer_saturation_seen
 
 
 #TODO(jwood): Could maybe add thread sleeps in here if the to-target state machine gets behind (so if
@@ -234,23 +286,24 @@ class ChunkFromClientStateMachine(object):
         if chunk_length:
             self._state_enter_process_data(chunk_length)
 
-        # A zero chunk lenght indicates we are done processing requests.
+        # A zero chunk length indicates we are done processing requests.
         else:
             self._state_enter_done()
 
     def _state_callback_process_data(self, data):
         """Process the chunk of data we just recieved."""
-        print('state-callback:process_data()..."{0}"'.format(data))
+        print('state-callback:process_data()..."{0}" bytes'.format(len(data)))
 
         assert data[-2:] == b'\r\n', "chunk data ends with CRLF"
         # self.data.chunk.write(data[:-2])
-        print('...writing:"{0}"'.format(data[:-2]))
+        # print('...writing:"{0}"'.format(data[:-2]))
 
         # Give next set of data to the to-target state machine to manage.
-        self.machine_to_target.send_chunk_data(data[:-2])
+        self.machine_to_target.send_chunk_data(data[:-2],
+                                               self._state_enter_look_for_length)
 
         # Setup to process the next chunk of data.
-        self._state_enter_look_for_length()
+        # ...see above...self._state_enter_look_for_length()
 
 
 class ChunkedHandler(web.RequestHandler):
